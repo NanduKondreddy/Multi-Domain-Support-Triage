@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import json
 
 from corpus_loader import load_corpus
 from classifier import classify_request_type
@@ -16,13 +17,15 @@ from validator import validate_output
 from semantic_safety import semantic_risk_detect
 
 #----------------------------------------------------------------------------
+# APEX THRESHOLDS
 CONF_HIGH = 0.65
 CONF_LOW = 0.40
 
 INTENT_PATTERNS = {
-    "password_reset": ["password", "forgot", "login", "sign in", "reset"],
-    "fraud": ["unknown", "not mine", "unauthorized", "fraud", "stolen", "charge"],
-    "card_issue": ["declined", "blocked", "failed", "abroad", "overseas", "travel", "traveling"]
+    "password_reset": ["password", "forgot", "login", "sign in", "reset", "access", "locked"],
+    "fraud": ["unknown", "not mine", "unauthorized", "fraud", "stolen", "charge", "security", "scam"],
+    "card_issue": ["declined", "blocked", "failed", "abroad", "overseas", "travel", "traveling", "limit", "refund", "billing", "payment"],
+    "technical": ["api", "anthropic", "claude", "integration", "test", "coding", "error", "bug", "crash"]
 }
 
 def detect_intent(text):
@@ -57,13 +60,133 @@ def detect_intent(text):
         pass
     return None
 
-def compute_confidence(bm25, semantic, overlap):
-    # Normalize components to [0,1]
-    n_bm25 = max(0.0, min(1.0, bm25 / 15.0))
-    n_sem = max(0.0, min(1.0, semantic))
-    n_ov = max(0.0, min(1.0, overlap / 5.0))
-    # Calibrated weights: 40% BM25, 40% Semantic/Vector, 20% Title/Path Overlap
-    return 0.4 * n_bm25 + 0.4 * n_sem + 0.2 * n_ov
+def calculate_explainable_score(text: str, intent: str, hits: list[Hit]) -> dict[str, float]:
+    """Calculates a forensic, weighted confidence score."""
+    t_lower = text.lower()
+    
+    # 1. Keyword Score (35%) - based on exact matches of intent markers
+    best_kw_score = 0.0
+    for i_type, markers in INTENT_PATTERNS.items():
+        match_count = sum(1 for m in markers if m in t_lower)
+        s = min(1.0, match_count / 1.5)
+        if s > best_kw_score: best_kw_score = s
+    keyword_score = best_kw_score
+    
+    # 2. Domain Score (30%) - alignment with retrieved corpus domain
+    domain_score = 0.0
+    if hits:
+        top_hit = hits[0]
+        domain_keywords = {
+            "visa": ["card", "payment", "transaction", "visa", "bank", "refund", "limit", "billing", "declined"],
+            "claude": ["api", "anthropic", "chat", "model", "token", "integration", "subscription", "plan"],
+            "hackerrank": ["test", "coding", "candidate", "contest", "platform", "assessment", "recruiter", "invite"]
+        }
+        target_words = domain_keywords.get(top_hit.doc.domain.lower(), [])
+        if any(w in t_lower for w in target_words):
+            domain_score = 1.0
+        else:
+            domain_score = 0.5 # Neutral
+            
+    # 3. Intent Coherence (20%) - consistency of top hits
+    intent_coherence = 0.0
+    if len(hits) > 0:
+        # If intents were merged, we give a coherence bonus
+        intent_coherence = 0.8
+        if len(hits) > 2:
+            shared = sum(1 for h in hits[:3] if h.doc.domain == hits[0].doc.domain)
+            intent_coherence = max(intent_coherence, shared / 3.0)
+    else:
+        intent_coherence = 0.3 # Default for no hits but intent detected
+        
+    # 4. Signal Strength (10%) - length and token clarity
+    tokens = [w for w in t_lower.split() if len(w) > 2]
+    signal_strength = min(1.0, len(tokens) / 5.0)
+    # Signal Strength Floor (0.30) - protect short valid queries
+    signal_strength = max(signal_strength, 0.30)
+    
+    # Domain Score Safety Boost
+    if domain_score < 0.30 and keyword_score > 0.60:
+        domain_score = min(domain_score + 0.20, 1.0)
+    
+    # FINAL WEIGHTED FUSION
+    total = (0.35 * keyword_score + 
+             0.35 * domain_score + 
+             0.20 * intent_coherence + 
+             0.10 * signal_strength)
+             
+    return {
+        "total": total,
+        "keyword_score": round(keyword_score, 2),
+        "domain_score": round(domain_score, 2),
+        "intent_coherence": round(intent_coherence, 2),
+        "signal_strength": round(signal_strength, 2)
+    }
+
+def adaptive_conflict_resolver(intents: list[str]) -> bool:
+    """Escalates only on cross-domain high-confidence conflicts."""
+    if len(intents) <= 1: return False
+    
+    domains = set()
+    for intent in intents:
+        i_lower = intent.lower()
+        if any(w in i_lower for w in ["visa", "card", "transaction"]): domains.add("visa")
+        elif any(w in i_lower for w in ["claude", "api", "chat"]): domains.add("claude")
+        elif any(w in i_lower for w in ["test", "coding", "hackerrank"]): domains.add("hackerrank")
+    
+    # Conflict: Ticket spans unrelated domains without a logical bridge
+    # Exception: Account issues can span domains
+    if "account" in " ".join(intents).lower():
+        return False # Likely related to platform access
+        
+    return len(domains) >= 2
+
+def apex_merge_intents(intents: list[str]) -> list[str]:
+    """Combines compatible intents into a unified resolution path."""
+    if len(intents) <= 1: return intents
+    
+    # Merge Logic: If intents share a common logical dependency
+    logical_groups = {
+        "access": ["password", "login", "reset", "sign in", "account", "access"],
+        "transaction": ["payment", "card", "declined", "charge", "refund", "visa"]
+    }
+    
+    merged = []
+    seen_groups = set()
+    
+    for intent in intents:
+        assigned = False
+        for group, words in logical_groups.items():
+            if any(w in intent.lower() for w in words):
+                if group not in seen_groups:
+                    merged.append(intent)
+                    seen_groups.add(group)
+                assigned = True
+                break
+        if not assigned:
+            merged.append(intent)
+            
+    return merged
+
+def hybrid_noise_filter(text: str, initial_conf: float) -> bool:
+    """Resilient noise filter that protects short, valid queries."""
+    if not text: return True
+    t_len = len(text)
+    if t_len < 4: return initial_conf < 0.60 
+    
+    alphas = sum(1 for c in text if c.isalpha())
+    ratio = alphas / t_len
+    
+    # PROTECT: If it contains valid support keywords, it's NOT noise
+    support_kws = ["refund", "login", "failed", "payment", "account", "visa", "card"]
+    if any(k in text.lower() for k in support_kws): return False
+
+    # If it looks like noise but has high confidence, process it
+    if ratio < 0.30 and initial_conf < 0.40: return True
+    
+    symbols = sum(1 for c in text if not c.isalnum() and not c.isspace())
+    if symbols / t_len > 0.5 and initial_conf < 0.40: return True
+    
+    return False
 
 def is_grounded(response, ctx_chunks):
     if not response or not ctx_chunks: return False
@@ -413,359 +536,166 @@ class SupportAgent:
         ticket = sanitize_row(row)
         t_lower = ticket.text.lower()
 
-        # 🛡️ RESILIENCE LAYER: Zero-Data & Noise Handling
-        if not t_lower.strip() or len(t_lower) < 5:
+        # 🚀 1. INTENT ANALYSIS & ADAPTIVE RESOLUTION
+        intents = self.split_intents(t_lower)
+        
+        # Conflict Detection (e.g. Visa + Claude)
+        if adaptive_conflict_resolver(intents):
             return validate_output({
                 "status": "escalated",
                 "product_area": "conversation_management",
-                "response": "Your request is too brief or empty. Please provide more detail so we can assist you.",
-                "justification": "[Decision: resilience_block | reason=empty_input] Input below safe diagnostic threshold.",
+                "response": "Your request spans multiple unrelated services. Please contact support for a manual review.",
+                "justification": json.dumps({
+                    "decision": "intent_conflict",
+                    "reason": "Cross-domain high-confidence collision detected."
+                }),
+                "request_type": "product_issue"
+            })
+            
+        # Merge Related Intents
+        intents = apex_merge_intents(intents)
+        
+        # 🛡️ 2. HYBRID NOISE & INJECTION GUARD
+        # Use baseline confidence check
+        if hybrid_noise_filter(t_lower, 0.5):
+             return validate_output({
+                "status": "escalated",
+                "product_area": "conversation_management",
+                "response": "Your request contains excessive noise. Please provide more clarity.",
+                "justification": json.dumps({
+                    "decision": "noise_block",
+                    "reason": "Input failed alphabetic/symbol density heuristics."
+                }),
                 "request_type": "product_issue"
             })
 
-        # 🚀 UPGRADE 1 — INTENT NORMALIZATION
-        intent_type = detect_intent(t_lower)
-
-        # 🚀 FIX 3 — PROMPT INJECTION HARD BLOCK
+        from gates import contains_safety_signal, is_vague, handle_out_of_scope, retrieval_is_trustworthy, enforce_domain_match
+        
         if "ignore" in t_lower and "instruction" in t_lower:
             return validate_output({
                 "status": "escalated",
                 "product_area": "safety",
                 "response": "This request requires human review. Please contact support.",
-                "justification": "[Decision: safety | threat=injection] Prompt injection attempt detected.",
+                "justification": json.dumps({
+                    "decision": "safety_block",
+                    "reason": "Prompt injection attempt detected."
+                }),
                 "request_type": "risk"
             })
 
-        # 🚀 FIX 1 — FORCE VAGUE DETECTION
-        if (len(t_lower.split()) <= 4 or "something" in t_lower) and not intent_type:
-            return validate_output({
-                "status": "escalated",
-                "product_area": "conversation_management",
-                "response": "Please provide more details so we can assist you better.",
-                "justification": "[Decision: safety | clarity=low] Query too vague to safely answer",
-                "request_type": "product_issue"
-            })
-
-        # 🚀 FIX 2 — PASSWORD OVERRIDE (Intent-Aware)
-        if intent_type == "password_reset":
-            return validate_output({
-                "status": "replied",
-                "product_area": "general_support",
-                "response": "Use the 'Forgot Password' or 'Reset Password' option on the login page to recover your account. If you don't receive the email, check your spam folder or contact support.",
-                "justification": "[Decision: intent_match | type=password] Direct grounded response for account recovery.",
-                "request_type": "product_issue"
-            })
-            
-        # 🚀 INTENT-DRIVEN FRAUD ESCALATION
-        if intent_type == "fraud":
-             return validate_output({
-                "status": "escalated",
-                "product_area": "fraud_protection",
-                "response": "This appears to be a fraud-related issue. Please contact your card issuer immediately.",
-                "justification": "[Decision: intent_match | type=fraud] Escalated for human security review.",
-                "request_type": "risk"
-            })
-
-        # ------------------ FINAL CALIBRATION PATCH ------------------
-
-        # 2. PAYMENT FAILURE → FORCE ESCALATION
-        if any(p in t_lower for p in PAYMENT_RISK):
-            return validate_output({
-                "status": "escalated",
-                "product_area": "fraud_protection",
-                "response": "This appears to be a payment-related issue. Please contact your card issuer or support team for assistance.",
-                "justification": "Payment-related issue requires secure handling",
-                "request_type": "product_issue"
-            })
-
-        # 3. FAQ PROTECTION → PREVENT OVER-SAFETY
-        FAQ_HINTS = ["how", "what", "where", "can i", "is it possible"]
-
-        if any(h in t_lower for h in FAQ_HINTS):
-            semantic_label = None
-            is_ambiguous = False
-
-        # -------------------------------------------------------------
-        
-        from gates import (
-            contains_safety_signal, retrieval_is_trustworthy, 
-            is_vague, enforce_domain_match, handle_out_of_scope
-        )
-        
-        # 1. Sanitize input + detect injection
-        if "ignore previous instructions" in t_lower or "system override" in t_lower:
-            return self._escalate("conversation_management", "product_issue", "Prompt injection detected. Escalating.", None, ticket.text, 0.99)
-        
-        # 2. SEMANTIC SAFETY CHECK (early layer - catches soft signals)
-        semantic_label, semantic_score, is_ambiguous = semantic_risk_detect(ticket.text)
-        
-        # Escalate if:
-        # A) Clear risk detected (label is not None)
-        # B) Ambiguous risk (multiple patterns, even if borderline)
-        if semantic_label is not None:
-            # Construct justification
-            if semantic_label is not None:
-                risk_type = f"Semantic safety detected: {semantic_label} ({semantic_score:.2f})"
-            else:
-                risk_type = "Ambiguous risk pattern detected (multiple safety signals present)"
-            
-            return validate_output({
-                "status": "escalated",
-                "product_area": "safety",
-                "response": "This request requires human review. Please contact support.",
-                "justification": risk_type,
-                "request_type": "risk"
-            })
-            
-        # 3. Run safety scan (CRITICAL patterns)
-        if contains_safety_signal(t_lower):
-            return self._escalate("fraud_protection", "product_issue", "Critical risk detected. Escalating to human support.", None, ticket.text, 0.99)
-            
-        # 4. Check vague patterns
-        if is_vague(ticket.text):
-            return self._escalate("conversation_management", "product_issue", "Insufficient detail to diagnose. Human follow-up needed.", None, ticket.text, 0.99)
-            
-        # Split intents for Multi-Intent logic
-        intents = self.split_intents(ticket.text)
-
-        # 🛡️ COMPLEXITY GUARD: Multi-Intent Congestion
-        if len(intents) > 2:
-            return validate_output({
-                "status": "escalated",
-                "product_area": "conversation_management",
-                "response": "Your request contains multiple complex issues. Please contact support for a detailed manual review.",
-                "justification": "[Decision: resilience_block | reason=multi_intent_complexity] Ticket exceeds automated multi-intent capacity.",
-                "request_type": "product_issue"
-            })
-        
+        # 🚀 3. APEX TRIAGE LOOP
         answers = []
         escalations = []
         
         for intent in intents:
             intent_lower = intent.lower()
             
-            if contains_safety_signal(intent_lower):
-                escalations.append({"intent": intent, "reason": "Critical risk detected."})
-                continue
-                
+            # Domain Determination
             detected_domain = None
-            if "visa" in intent_lower or "card" in intent_lower or "transaction" in intent_lower:
-                detected_domain = "visa"
-            elif "claude" in intent_lower or "api" in intent_lower or "chat" in intent_lower:
-                detected_domain = "claude"
-            elif "test" in intent_lower or "coding" in intent_lower or "candidate" in intent_lower:
-                detected_domain = "hackerrank"
+            if any(w in intent_lower for w in ["visa", "card", "transaction"]): detected_domain = "visa"
+            elif any(w in intent_lower for w in ["claude", "api", "chat"]): detected_domain = "claude"
+            elif any(w in intent_lower for w in ["test", "coding", "hackerrank"]): detected_domain = "hackerrank"
+            
             domain = detected_domain if detected_domain else (ticket.company.lower() if ticket.company else "")
             
+            # Retrieval
             hits = self.retriever.search(intent, domain=domain, k=5) if domain else self.retriever.search(intent, k=5)
             
-            # 🚀 FAQ override BEFORE retrieval/OOS
-            query_lower = intent.lower()
-            fallback = self.intent_specific_answer(intent)
-            if not fallback and any(h in query_lower for h in ["how", "what", "where", "can i", "is it possible"]):
-                # Generic FAQ fallback logic
-                if "password" in query_lower:
-                    fallback = "Use the 'Forgot Password' option on the login page to recover your account."
-                elif "card" in query_lower and "work" in query_lower:
-                    fallback = "Check if your card is active and has sufficient funds. Contact your issuer if the issue persists."
-
-            if fallback:
-                answers.append({
-                    "status": "replied",
-                    "product_area": "general_support",
-                    "response": fallback,
-                    "justification": "FAQ fallback triggered.",
-                    "request_type": "product_issue"
-                })
-                continue
-
-            if not hits:
-                oos = handle_out_of_scope(intent, 0.0)
-                if oos:
-                    if oos["status"] == "escalated":
-                        escalations.append({"intent": intent, "reason": oos["justification"]})
-                    else:
-                        answers.append(oos)
+            # --- APEX SCORING & RESOLUTION ---
+            scores = calculate_explainable_score(intent, intent, hits)
+            conf = scores["total"]
+            
+            # Band 1: Resolve Confidently (High Threshold)
+            if conf >= CONF_HIGH:
+                trustworthy, reason = retrieval_is_trustworthy(intent, hits, hits[0].score if hits else 0)
+                if trustworthy and enforce_domain_match(domain, hits):
+                    s_label, s_score, s_ambig = semantic_risk_detect(intent)
+                    decision = make_decision(intent, hits, (s_label, s_score, s_ambig), retrieval_confidence=conf, use_llm=False)
+                    answers.append({
+                        "status": "replied",
+                        "product_area": decision.product_area if hasattr(decision, "product_area") else "general_support",
+                        "response": decision.response,
+                        "justification": json.dumps({
+                            "confidence": conf,
+                            "keyword_score": scores["keyword_score"],
+                            "domain_score": scores["domain_score"],
+                            "intent_coherence": scores["intent_coherence"],
+                            "signal_strength": scores["signal_strength"],
+                            "final_intent": intent,
+                            "merged": len(intents) < (len(self.split_intents(t_lower))),
+                            "decision": "resolve",
+                            "reason": f"High confidence grounding: {decision.justification}"
+                        }),
+                        "request_type": "product_issue"
+                    })
                 else:
-                    escalations.append({"intent": intent, "reason": "no_chunks"})
-                continue
+                    escalations.append({"intent": intent, "reason": f"Grounding check failed: {reason}", "scores": scores})
+                    
+            # Band 2: Guided Clarification (Medium Threshold)
+            elif conf >= CONF_LOW:
+                suggestion = self.intent_specific_answer(intent)
+                # Controlled Fallback for Unknown Categories
+                if not suggestion:
+                    if domain == "visa": suggestion = "inquire about your specific card transaction or limit."
+                    elif domain == "claude": suggestion = "ask about API integration or model usage."
+                    elif domain == "hackerrank": suggestion = "contact support regarding your candidate assessment."
                 
-            top_score = hits[0].score
-            
-            oos = handle_out_of_scope(intent, top_score)
-            if oos:
-                if oos["status"] == "escalated":
-                    escalations.append({"intent": intent, "reason": oos["justification"]})
+                if suggestion:
+                    answers.append({
+                        "status": "replied",
+                        "product_area": "general_support",
+                        "response": f"Your query seems related to {suggestion} Please provide more details or verify if this matches your issue.",
+                        "justification": json.dumps({
+                            "confidence": conf,
+                            "scores": scores,
+                            "decision": "clarify",
+                            "reason": "Confidence in mid-range; providing guided fallback."
+                        }),
+                        "request_type": "product_issue"
+                    })
                 else:
-                    answers.append(oos)
-                continue
-                
-            trustworthy, reason = retrieval_is_trustworthy(intent, hits, top_score)
-            # Allow FAQ override even if retrieval is weak
-            if not trustworthy:
-                # Detect FAQ using ORIGINAL QUERY (not intent)
-                query_lower = ticket.text.lower()
-
-                if any(h in query_lower for h in ["how", "what", "where", "can i", "is it possible"]):
-                    # Try fallback instead of escalation
-                    fallback = self.intent_specific_answer(intent)
-                    if fallback:
-                        answers.append({
-                            "status": "replied",
-                            "product_area": "general_support",
-                            "response": fallback,
-                            "justification": "FAQ fallback used due to weak retrieval",
-                            "request_type": "product_issue"
-                        })
-                        continue
-                escalations.append({"intent": intent, "reason": f"Insufficient retrieval confidence ({reason})."})
-                continue
-                
-            if not enforce_domain_match(domain, hits):
-                escalations.append({"intent": intent, "reason": "Domain mismatch between query and retrieval."})
-                continue
-                
-# PHASE 3: Use Decision Engine for intelligent routing
-            # Get semantic risk info
-            sem_label, sem_score, sem_ambiguous = semantic_risk_detect(intent)
-            semantic_risk = (sem_label, sem_score, sem_ambiguous) if sem_label else None
+                    escalations.append({"intent": intent, "reason": "Insufficient confidence for automated guidance.", "scores": scores})
             
-            # Make decision using the decision engine
-            decision = make_decision(
-                query=intent,
-                retrieved_chunks=hits,
-                semantic_risk=semantic_risk,
-                retrieval_confidence=top_score,
-                use_llm=False,  # Use static rules by default
-            )
-            
-                
-            
-            # If decision engine says escalate, respect it
-            if not decision.safe_to_answer:
-                escalations.append({
-                    "intent": intent,
-                    "reason": decision.reasoning
-                })
-                continue
-            
-            # 🚀 UPGRADE 2 — CALIBRATED CONFIDENCE FUSION
-            bm25_norm = max(0.0, min(1.0, hits[0].bm25_score / 15.0))
-            semantic_norm = hits[0].vector_score
-            overlap_norm = max(0.0, min(1.0, hits[0].overlap / 5.0))
-            confidence = compute_confidence(hits[0].bm25_score, semantic_norm, hits[0].overlap)
-            
-            # 🚀 UPGRADE 4 — RETRIEVAL SANITY GATE
-            if not retrieval_sanity(hits):
-                escalations.append({
-                    "intent": intent,
-                    "reason": f"[Decision: sanity_fail | confidence={confidence:.2f}] Retrieval context lacks sufficient relevance."
-                })
-                continue
-
-            # 🚀 UPGRADE 5 — DOMAIN CONSISTENCY GATE
-            if not domain_consistent(intent_type, hits[0].doc.domain):
-                escalations.append({
-                    "intent": intent,
-                    "reason": f"[Decision: domain_mismatch | intent={intent_type} domain={hits[0].doc.domain}] Cross-domain error prevented."
-                })
-                continue
-
-            # 🚀 CALIBRATED DECISION THRESHOLDS
-            if confidence <= CONF_LOW:
-                 escalations.append({
-                    "intent": intent,
-                    "reason": f"[Decision: low_confidence | confidence={confidence:.2f}] Score below safe threshold."
-                })
-                 continue
-
-            request_type = classify_request_type(intent, domain)
-            if request_type == "invalid":
-                request_type = "product_issue"
-            if "tap" in intent_lower or "contactless" in intent_lower:
-                request_type = "product_issue"
-                
-            if request_type == "feature_request":
-                answers.append({
-                    "status": "replied",
-                    "request_type": "feature_request",
-                    "product_area": "general_support",
-                    "response": "Thanks for your suggestion. Feature requests are reviewed by the product team and may be considered for future updates.",
-                    "justification": f"[Decision: feature_request | confidence=1.0] Acknowledged."
-                })
-                continue
-                
-            product_area = area_override(intent, domain, hits[0].doc.product_area)
-            res = self._reply(domain or "", product_area, request_type, hits, intent, confidence, "")
-            
-            # 🚀 UPGRADE 3 — DUAL GROUNDING GUARD
-            if not is_grounded(res["response"], [h.doc.text for h in hits]):
-                 escalations.append({
-                    "intent": intent,
-                    "reason": f"[Decision: grounding_fail | confidence={confidence:.2f}] Failed dual lexical-semantic grounding validation."
-                })
-                 continue
-
-            # 🚀 UPGRADE 6 — PARTIAL MODE (Confidence Band)
-            if CONF_LOW < confidence < CONF_HIGH:
-                res["status"] = "replied"
-                res["response"] += "\n\nNote: This information is based on available documentation and may partially address your issue. Please verify these steps or contact support if the issue persists."
-                decision_type = "partial"
+            # Band 3: Safe Escalation (Low Threshold)
             else:
-                decision_type = "grounded"
+                escalations.append({"intent": intent, "reason": f"Confidence below safe Apex threshold ({conf:.2f}).", "scores": scores})
 
-            # 🚀 UPGRADE 6 — AUDITABLE DECISION TRACE
-            res["justification"] = (
-                f"[Decision: {decision_type} | "
-                f"intent={intent_type or 'none'} | "
-                f"conf={confidence:.2f} | "
-                f"bm25={bm25_norm:.2f} sem={semantic_norm:.2f} ovl={overlap_norm:.2f}] "
-                + res.get("justification", "")
-            )
-            
-            answers.append(res)
-            
-        if answers and escalations:
-            response_text = "Here's how to address your request:\n\n"
-            for i, r in enumerate(answers, 1):
-                prefix = "For your first issue" if i == 1 else "For your second issue" if i == 2 else "For your next issue"
-                response_text += f"{i}. {prefix}:\n   {r['response']}\n\n"
-            response_text += f"⚠️ Some parts of your request require further review and have been escalated to our support team. They will contact you within 24 hours."
-            
-            return validate_output({
-                "status": "replied",
-                "product_area": answers[0].get("product_area", "general_support"),
-                "response": response_text.strip(),
-                "justification": f"Answered {len(answers)} safe intent(s); flagged {len(escalations)} for human review.",
-                "request_type": answers[0].get("request_type", "product_issue")
-            })
-            
-        elif escalations and not answers:
-            reasons = " | ".join(e["reason"] for e in escalations)
-            return validate_output({
+        # Final Assembly
+        if not answers and not escalations:
+             return validate_output({
                 "status": "escalated",
                 "product_area": "general_support",
-                "response": "Escalate to a human support specialist. This case needs account-specific review or carries risk that should not be resolved by an automated agent.",
-                "justification": reasons,
+                "response": "I'm not quite sure how to help with that request. Let me get a human specialist to assist you.",
+                "justification": json.dumps({"decision": "final_fallback", "reason": "No confident intents or matches detected."}),
                 "request_type": "product_issue"
             })
             
-        else:
-            if len(answers) == 1:
-                return validate_output(answers[0])
-            
-            response_text = "Here's how to address your request:\n\n"
-            for i, r in enumerate(answers, 1):
-                prefix = "For your first issue" if i == 1 else "For your second issue" if i == 2 else "For your next issue"
-                response_text += f"{i}. {prefix}:\n   {r['response']}\n\n"
-            
+        if escalations:
+            main_e = escalations[0]
             return validate_output({
-                "status": "replied",
-                "product_area": answers[0].get("product_area", "general_support"),
-                "response": response_text.strip(),
-                "justification": " | ".join(a["justification"] for a in answers),
-                "request_type": answers[0].get("request_type", "product_issue")
+                "status": "escalated",
+                "product_area": "general_support",
+                "response": "I've reviewed your request and it requires human assistance to ensure it's handled correctly.",
+                "justification": json.dumps({
+                    "decision": "safe_escalation",
+                    "reason": main_e["reason"],
+                    "scores": main_e.get("scores", {})
+                }),
+                "request_type": "product_issue"
             })
+            
+        final_response = " ".join([a["response"] for a in answers])
+        
+        # Merge justifications for multi-intent
+        first_just = json.loads(answers[0]["justification"]) if isinstance(answers[0]["justification"], str) else answers[0]["justification"]
+        
+        return validate_output({
+            "status": "replied",
+            "product_area": answers[0]["product_area"],
+            "response": final_response,
+            "justification": json.dumps(first_just),
+            "request_type": "product_issue"
+        })
 
     def _process_single_intent(self, ticket: Any, text: str) -> dict[str, str]:
         pass

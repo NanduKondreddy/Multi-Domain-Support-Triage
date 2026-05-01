@@ -15,6 +15,12 @@ graph LR
     Grounding --> Output[Validated Response]
 ```
 
+## 📂 Repository Structure
+- **`code/`**: Core triage engine implementation.
+- **`support_issues/`**: Input dataset and evaluation `output.csv`.
+- **`README.md`**: Primary documentation and architectural deep-dive.
+- **`AGENTS.md`**: Hackathon compliance and log tracking.
+
 ## 🧠 Core Design Principles
 - **Hybrid Intent Detection**: Combines exact pattern matching with a semantic fallback layer to capture diverse paraphrases without losing keyword precision.
 - **Calibrated Confidence Fusion**: Decisions are based on a normalized weighted score ($0.4 \times \text{BM25} + 0.4 \times \text{Semantic} + 0.2 \times \text{Overlap}$) rather than a single LLM interpretation.
