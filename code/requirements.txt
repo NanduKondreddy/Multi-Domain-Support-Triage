@@ -1,0 +1,7 @@
+# Core runtime dependency
+sentence-transformers>=2.2.0
+
+# Optional: For Claude API (LLM fallback, disabled by default)
+# anthropic>=0.7.0
+
+# Python 3.9+ supported

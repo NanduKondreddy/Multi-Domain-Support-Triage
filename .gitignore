@@ -31,3 +31,9 @@ data/index/
 data/embeddings/
 *.sqlite
 *.db
+
+# artifacts
+regression_results*.csv
+regression_out.csv
+judge_results*.csv
+regression.csv
