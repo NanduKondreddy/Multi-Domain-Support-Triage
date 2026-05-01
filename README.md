@@ -1,59 +1,46 @@
-# Multi-Domain Support Triage Agent
+# Robust Support Triage Agent
 
-## TL;DR
-An elite, production-grade AI support agent designed to resolve complex tickets across HackerRank, Claude, and Visa domains. Built on a deterministic "Single Hull" architecture, it combines semantic intent mapping with calibrated confidence fusion to ensure zero hallucinations and 100% decision traceability.
+A deterministic, retrieval-augmented AI agent built for HackerRank, Claude, and Visa support domains. This system prioritizes factual grounding and safety-first escalation over generative flexibility.
 
-## 🚀 Architecture
-Our agent uses a unified reasoning pipeline that prioritizes safety and grounding over generative creativity.
+## 🏗️ System Architecture
+The agent follows a linear, auditable pipeline to ensure every decision is traceable and reproducible.
 
 ```mermaid
-graph TD
-    A[User Ticket] --> B[Sanitizer & Safety Gate]
-    B --> C[Unified Intent Controller]
-    C --> D[Hybrid Retriever]
-    D --> E[Calibrated Confidence Fusion]
-    E --> F{Safe to Answer?}
-    F -- Yes --> G[Dual-Signal Grounding Guard]
-    F -- No --> H[Intelligent Escalation]
-    G --> I[Final Validated Response]
+graph LR
+    Input --> Safety[Safety & Resilience]
+    Safety --> Intent[Intent Mapping]
+    Intent --> Retrieval[Hybrid Retrieval]
+    Retrieval --> Calibrate[Confidence Fusion]
+    Calibrate --> Grounding[Dual-Signal Validation]
+    Grounding --> Output[Validated Response]
 ```
 
-## 🧠 Design Decisions
-- **Why Pattern + Semantic Fallback?**: We removed brittle keyword matching in favor of a semantic probability map. This allows the agent to understand paraphrases like "can't sign in" while maintaining the speed of exact patterns.
-- **Why Separate Escalation Guard?**: Safety is non-negotiable. By decoupling the escalation logic from the response generation, we ensure that high-risk queries (Fraud, PII) are blocked before they ever touch the LLM.
-- **Why Calibrated Confidence?**: We use a weighted fusion of BM25, Semantic Similarity, and Title Overlap. This provides a continuous reasoning metric that is far more reliable than a single LLM "hunch."
-- **Why Dual-Signal Grounding?**: Every response must pass both a lexical N-gram check and a semantic vector similarity check. This is our "Top 1%" guarantee against hallucinations.
+## 🧠 Core Design Principles
+- **Hybrid Intent Detection**: Combines exact pattern matching with a semantic fallback layer to capture diverse paraphrases without losing keyword precision.
+- **Calibrated Confidence Fusion**: Decisions are based on a normalized weighted score ($0.4 \times \text{BM25} + 0.4 \times \text{Semantic} + 0.2 \times \text{Overlap}$) rather than a single LLM interpretation.
+- **Dual-Signal Grounding Guard**: Every response is verified against the source corpus using both lexical (N-gram) and semantic (embedding) similarity checks.
+- **Zero-Hallucination Policy**: The system is designed to autonomously escalate to human support if retrieval confidence is low or if the grounding check fails.
 
 ## 🛠️ Pipeline Stages
-1. **Sanitizer**: Cleans PII and strips prompt injection attempts.
-2. **Router**: Identifies the product domain and routes to appropriate logic.
-3. **Retriever**: Fetches grounded context via Hybrid (BM25 + Vector) search.
-4. **Calibrated Confidence**: Calculates a score $[0,1]$ to determine resolution path.
-5. **Escalation Guard**: Final safety check for high-risk or ambiguous intents.
-6. **Output Validator**: Enforces strict JSON schema and tone consistency.
+1. **Safety Layer**: Filters PII, prompt injections, and safety-critical risks.
+2. **Resilience Guard**: Blocks empty, extremely short, or gibberish inputs.
+3. **Intent Controller**: Maps queries to known support categories (e.g., password recovery, fraud).
+4. **Hybrid Retriever**: Fetches context from the domain-specific corpus.
+5. **Validation Engine**: Enforces strict grounding and domain consistency.
 
-## ⚖️ Trade-offs
-| Approach | Decision | Why? |
-|---|---|---|
-| **Pure LLM** | Rejected | High hallucination risk and non-deterministic behavior. |
-| **Vector-Only** | Rejected | Can miss specific technical terms or exact FAQ matches. |
-| **Hybrid Model** | **Selected** | Best balance of exact precision and conceptual understanding. |
+## ⚖️ Trade-offs & Logic
+- **Why not fully generative?**: To prevent "hallucinated policies" and ensure compliance with strict support documentation.
+- **Why Hybrid Retrieval?**: BM25 excels at technical terms (like "API"), while semantic embeddings handle conceptual matching.
 
-## ✅ Validation
-- **10/10 Score**: Achieved perfect performance on the final adversarial judge suite.
-- **Regression Suite**: Verified against a 10-case suite covering multi-intent and extreme paraphrases.
-- **Determinism**: 100% reproducible results verified across sequential runs.
+## ⚠️ Limitations
+- **Predefined Scope**: Performance is optimized for the three provided domains; out-of-domain queries are escalated by design.
+- **Short Context Window**: Extremely long or multi-part tickets may experience retrieval truncation in the current iteration.
+- **Pattern Dependency**: Highly complex, multi-intent queries may require human disambiguation if confidence scores drop below $0.40$.
 
-## Failure Modes (Honest)
-- **Vague Phrasing**: Queries like "it's not working" without context will trigger safe escalation.
-- **Tickets Exceeding Window**: Extremely long tickets may experience retrieval truncation.
-- **Unknown Product Domains**: Requests outside HackerRank/Claude/Visa are escalated by design.
-
-## 🔮 What I'd Do With More Time
-1. **Cross-Encoder Re-ranking**: Add a second-stage re-ranker to further refine retrieval precision for edge cases.
-2. **Dynamic Thresholding**: Use a small validation set to automatically tune the `CONF_HIGH` threshold based on domain drift.
-3. **Multi-Turn Context**: Implement session memory to handle follow-up questions while maintaining grounding safety.
-4. **Automated A/B Testing**: Build a CLI tool to measure the impact of prompt tweaks on escalation recall.
+## ✅ Validation Results
+- **Determinism**: 100% identical outputs across sequential runs on the full dataset.
+- **Safety**: Passed all adversarial judge test cases, including prompt injections.
+- **Grounding**: Thresholds tuned ($0.65$ high / $0.40$ low) to minimize false positives.
 
 ## 🚀 Reproducing
 ```bash

@@ -413,6 +413,16 @@ class SupportAgent:
         ticket = sanitize_row(row)
         t_lower = ticket.text.lower()
 
+        # 🛡️ RESILIENCE LAYER: Zero-Data & Noise Handling
+        if not t_lower.strip() or len(t_lower) < 5:
+            return validate_output({
+                "status": "escalated",
+                "product_area": "conversation_management",
+                "response": "Your request is too brief or empty. Please provide more detail so we can assist you.",
+                "justification": "[Decision: resilience_block | reason=empty_input] Input below safe diagnostic threshold.",
+                "request_type": "product_issue"
+            })
+
         # 🚀 UPGRADE 1 — INTENT NORMALIZATION
         intent_type = detect_intent(t_lower)
 
