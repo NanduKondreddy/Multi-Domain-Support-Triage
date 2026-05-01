@@ -527,6 +527,16 @@ class SupportAgent:
             
         # Split intents for Multi-Intent logic
         intents = self.split_intents(ticket.text)
+
+        # 🛡️ COMPLEXITY GUARD: Multi-Intent Congestion
+        if len(intents) > 2:
+            return validate_output({
+                "status": "escalated",
+                "product_area": "conversation_management",
+                "response": "Your request contains multiple complex issues. Please contact support for a detailed manual review.",
+                "justification": "[Decision: resilience_block | reason=multi_intent_complexity] Ticket exceeds automated multi-intent capacity.",
+                "request_type": "product_issue"
+            })
         
         answers = []
         escalations = []
