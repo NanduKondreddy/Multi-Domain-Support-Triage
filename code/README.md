@@ -1,6 +1,6 @@
-# code/ - Support Triage Agent Core
+# code/ - Core Implementation
 
-This directory contains the primary implementation of the Multi-Domain Support Triage Agent.
+This directory contains the primary logic for the Multi-Domain Support Triage Agent.
 
 ## 🚀 Execution
 ```bash
